@@ -22,7 +22,7 @@ def _get_engine():
             settings.postgres_url,
             pool_pre_ping=True,
             pool_recycle=300,
-            connect_args={"connect_timeout": "5"},
+            connect_args={"connect_timeout": 5},  # <-- Integer 5 instead of "5"
         )
         _SessionLocal = sessionmaker(bind=_engine, autocommit=False, autoflush=False)
     return _engine, _SessionLocal

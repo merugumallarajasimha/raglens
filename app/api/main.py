@@ -2,11 +2,27 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+# Ensure parent directory is in python search path
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+
 from app.core.config import Settings, get_settings
 from app.core.logging import setup_logging
+
+
+def get_router(module_name: str):
+    """Safely import a router whether it is in 'app.api.routers' or 'app.api.routes'."""
+    try:
+        mod = __import__(f"app.api.routers.{module_name}", fromlist=["router"])
+        return mod.router
+    except ImportError:
+        mod = __import__(f"app.api.routes.{module_name}", fromlist=["router"])
+        return mod.router
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -35,17 +51,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.state.settings = settings
 
-    from app.api.routes.health import router as health_router
+    # Dynamically load routers to avoid path mismatches
+    health_router = get_router("health")
+    papers_router = get_router("papers")
+    query_router = get_router("query")
+    search_router = get_router("search")
+
     app.include_router(health_router, prefix="/health", tags=["health"])
-
-    from app.api.routes.papers import router as papers_router
     app.include_router(papers_router, prefix="/papers", tags=["papers"])
-
-    from app.api.routes.query import router as query_router
-    app.include_router(query_router, tags=["query"])
-
-    from app.api.routes.search import router as search_router
-    app.include_router(search_router, tags=["search"])
+    app.include_router(query_router, prefix="/query", tags=["query"])
+    app.include_router(search_router, prefix="/search", tags=["search"])
 
     @app.get("/", tags=["root"])
     async def root() -> dict:
