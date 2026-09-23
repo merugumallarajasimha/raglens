@@ -252,6 +252,15 @@ class Chunker:
         """
         text = "\n".join(text_parts)
 
+        # Prepend section header for context (improves retrieval for section-specific queries)
+        header_parts = []
+        if section:
+            header_parts.append(f"Section: {section}")
+        if subsection:
+            header_parts.append(f"Subsection: {subsection}")
+        if header_parts:
+            text = " | ".join(header_parts) + "\n" + text
+
         # Compute overlap text (last N tokens worth)
         overlap_parts: list[str] = []
         overlap_tokens = 0
@@ -308,6 +317,15 @@ class Chunker:
 
             if current_tokens + para_tokens > self.chunk_size and current_text:
                 text = "\n".join(current_text)
+                # Prepend section header for context
+                header_parts = []
+                if current_section:
+                    header_parts.append(f"Section: {current_section}")
+                if current_subsection:
+                    header_parts.append(f"Subsection: {current_subsection}")
+                if header_parts:
+                    text = " | ".join(header_parts) + "\n" + text
+
                 chunk = Chunk(
                     chunk_id=make_chunk_id(paper.metadata.paper_id, current_section,
                                            current_subsection, chunk_index),
@@ -341,6 +359,15 @@ class Chunker:
 
         if current_text:
             text = "\n".join(current_text)
+            # Prepend section header for context
+            header_parts = []
+            if current_section:
+                header_parts.append(f"Section: {current_section}")
+            if current_subsection:
+                header_parts.append(f"Subsection: {current_subsection}")
+            if header_parts:
+                text = " | ".join(header_parts) + "\n" + text
+
             chunk = Chunk(
                 chunk_id=make_chunk_id(paper.metadata.paper_id, current_section,
                                        current_subsection, chunk_index),

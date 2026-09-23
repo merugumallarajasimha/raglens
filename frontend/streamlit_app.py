@@ -6,6 +6,7 @@ This provides a chat-style interface for interacting with the RAG backend.
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 # ── Path setup ──────────────────────────────────────────────────────────
@@ -16,6 +17,53 @@ if _project_root not in sys.path:
 import streamlit as st
 
 BACKEND_URL = os.environ.get("RAGLENS_BACKEND_URL", "http://localhost:8000")
+
+
+def sanitize_math_syntax(text: str) -> str:
+    """Sanitize raw LaTeX bracket delimiters into standard Markdown math syntax.
+
+    - Converts display math \\[ ... \\] to $$ ... $$
+    - Converts inline math \\( ... \\) to $ ... $
+    """
+    if not text:
+        return text
+
+    # Convert display brackets \[ ... \] to $$ ... $$
+    text = re.sub(r'\\\[(.*?)\\\]', r'$$\1$$', text, flags=re.DOTALL)
+    # Convert inline brackets \( ... \) to $ ... $
+    text = re.sub(r'\\\((.*?)\\\)', r'$\1$', text, flags=re.DOTALL)
+
+    return text
+
+
+def render_response(response: dict) -> None:
+    """Render answer text, sources, evidence, and retrieval details."""
+    answer_text = sanitize_math_syntax(response.get("answer", ""))
+    st.markdown(answer_text)
+
+    # Sources
+    if response.get("sources"):
+        with st.expander("📄 Sources", expanded=False):
+            for src in response["sources"]:
+                st.markdown(
+                    f"[{src['citation_id']}] **{src.get('title', 'Untitled')}** "
+                    f"— {src.get('section', '—')} — Page {src.get('page', '?')}"
+                )
+                if src.get("evidence"):
+                    st.markdown(f"> {src['evidence'][:300]}...")
+
+    # Evidence
+    if response.get("evidence"):
+        with st.expander("🔬 Retrieved Evidence", expanded=False):
+            for ev in response["evidence"]:
+                st.markdown(f"---\n**{ev.get('paper_id', '')}**")
+                st.markdown(sanitize_math_syntax(ev.get("text", "")))
+                st.caption(f"Score: {ev.get('score', 0):.4f}")
+
+    # Retrieval details
+    if response.get("retrieval"):
+        with st.expander("🔍 Retrieval Details", expanded=False):
+            st.json(response["retrieval"])
 
 
 def main() -> None:
@@ -53,14 +101,20 @@ def main() -> None:
         if st.button("Refresh Health", use_container_width=True):
             check_health()
 
-    # ── Main ────────────────────────────────────────────────────────────
+    # ── Main Chat Interface ──────────────────────────────────────────────
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
     # Display chat history
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+            if msg["role"] == "user":
+                st.markdown(msg["content"])
+            else:
+                if isinstance(msg["content"], dict):
+                    render_response(msg["content"])
+                else:
+                    st.markdown(sanitize_math_syntax(msg["content"]))
 
     # Chat input
     prompt = st.chat_input("Ask a question about the research papers...")
@@ -71,32 +125,8 @@ def main() -> None:
 
         with st.chat_message("assistant"):
             response = query_backend(prompt, mode)
-            st.markdown(response["answer"])
-
-            # Sources
-            if response.get("sources"):
-                with st.expander("📄 Sources", expanded=False):
-                    for src in response["sources"]:
-                        st.markdown(
-                            f"[{src['citation_id']}] **{src.get('title', 'Untitled')}** "
-                            f"— {src.get('section', '—')} — Page {src.get('page', '?')}"
-                        )
-                        if src.get("evidence"):
-                            st.markdown(f"> {src['evidence'][:300]}...")
-
-            # Evidence
-            if response.get("evidence"):
-                with st.expander("🔬 Retrieved Evidence", expanded=False):
-                    for ev in response["evidence"]:
-                        st.markdown(f"---\n**{ev.get('paper_id', '')}**")
-                        st.markdown(ev.get("text", ""))
-                        st.caption(f"Score: {ev.get('score', 0):.4f}")
-
-            # Retrieval details
-            if response.get("retrieval"):
-                with st.expander("🔍 Retrieval Details", expanded=False):
-                    r = response["retrieval"]
-                    st.json(r)
+            render_response(response)
+            st.session_state.messages.append({"role": "assistant", "content": response})
 
     # Health status at the bottom
     check_health()
@@ -139,7 +169,10 @@ def query_backend(query: str, mode: str) -> dict:
                 headers={"Content-Type": "application/json"},
             )
             if resp.status_code == 200:
-                return resp.json()
+                data = resp.json()
+                if "answer" in data:
+                    data["answer"] = sanitize_math_syntax(data["answer"])
+                return data
             return {
                 "answer": f"Error: Backend returned {resp.status_code}",
                 "sources": [],

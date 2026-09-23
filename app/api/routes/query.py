@@ -25,6 +25,7 @@ class QueryRequest(BaseModel):
     filters: Optional[dict] = None
     conversation_id: Optional[str] = None
     use_standalone_query: bool = True
+    top_k: Optional[int] = Field(default=None, ge=1, le=100)
 
 
 class QueryResponse(BaseModel):
@@ -68,7 +69,8 @@ async def query(
             filters = RetrievalFilters(paper_ids=request.paper_ids)
 
         # Run the query pipeline
-        result = pipeline.answer(search_query, filters=filters)
+        logger.info(f"Query received: top_k={request.top_k}, query={request.query[:100]}")
+        result = pipeline.answer(search_query, filters=filters, top_k=request.top_k)
     except Exception as e:
         logger.error(f"Query endpoint failed: {e}")
         return QueryResponse(
@@ -188,4 +190,55 @@ async def evidence_search(
         claim=request.query,
         filters=filters,
     )
+    return result
+
+
+class DiagnosticsRequest(BaseModel):
+    """Request model for retrieval diagnostics."""
+
+    query: str = Field(..., min_length=1, max_length=2000)
+    text_fragment: Optional[str] = Field(
+        default=None,
+        description="Optional substring to scroll Qdrant for (e.g. 'identical layers')",
+    )
+    top_k: int = Field(default=20, ge=1, le=100)
+
+
+@router.post("/diagnostics", response_model=dict)
+async def retrieval_diagnostics(
+    request: DiagnosticsRequest,
+    pipeline: QueryPipeline = Depends(get_query_pipeline),
+) -> dict:
+    """Run raw retrieval diagnostics for a query.
+
+    Returns the raw dense + sparse scores before reranking, plus an
+    optional Qdrant scroll for a text fragment to confirm whether a chunk
+    exists in the collection at all.
+
+    Use this to isolate Recall vs Ranking issues.
+    """
+    from app.retrieval.diagnostics import debug_retrieval, scroll_for_text
+
+    search_service = pipeline._search_service
+
+    result = debug_retrieval(
+        query=request.query,
+        top_k=request.top_k,
+        vector_store=search_service._vector_store,
+        embedding_provider=search_service._embedding_provider,
+        sparse_retriever=search_service._sparse,
+    )
+
+    # Confirm collection point count
+    result["collection"] = {
+        "name": search_service._vector_store._collection_name,
+        "points_count": search_service._vector_store.count(),
+    }
+
+    if request.text_fragment:
+        result["scroll_matches"] = scroll_for_text(
+            text_fragment=request.text_fragment,
+            vector_store=search_service._vector_store,
+        )
+
     return result

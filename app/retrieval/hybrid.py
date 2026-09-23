@@ -89,12 +89,26 @@ class HybridRetriever:
         """
         start = time.time()
 
-        # Retrieve from both retrievers with larger k for fusion
-        dense_k = max(top_k * 2, 20)
-        sparse_k = max(top_k * 2, 20)
+        # Sanitize filters: convert empty dicts/falsy values to None
+        active_filters = filters if filters else None
 
-        dense_results = self._dense.retrieve(query, top_k=dense_k, filters=filters)
-        sparse_results = self._sparse.retrieve(query, top_k=sparse_k, filters=filters)
+        # Retrieve from both retrievers with larger candidate pool for fusion
+        # Fetch at least 30, or 3x top_k, from each retriever
+        dense_k = max(top_k * 3, 30)
+        sparse_k = max(top_k * 3, 30)
+
+        dense_results = []
+        sparse_results = []
+
+        try:
+            dense_results = self._dense.retrieve(query, top_k=dense_k, filters=active_filters)
+        except Exception as e:
+            logger.warning(f"Dense retrieval failed during hybrid search: {e}")
+
+        try:
+            sparse_results = self._sparse.retrieve(query, top_k=sparse_k, filters=active_filters)
+        except Exception as e:
+            logger.warning(f"Sparse retrieval failed during hybrid search: {e}")
 
         # Build RRF fused ranking
         rrf_scores: dict[str, dict] = {}
@@ -112,10 +126,10 @@ class HybridRetriever:
 
         # Sparse results
         for rank, result in enumerate(sparse_results):
-            chunk_id = result["chunk_id"]
+            chunk_id = result.get("chunk_id", str(rank))
             if chunk_id not in rrf_scores:
                 rrf_scores[chunk_id] = self._init_result_from_sparse(result)
-            rrf_scores[chunk_id]["sparse_score"] = float(result["score"])
+            rrf_scores[chunk_id]["sparse_score"] = float(result.get("score", 0.0))
             rrf_scores[chunk_id]["sparse_rank"] = rank + 1
             rrf_scores[chunk_id]["rrf_score"] += (
                 self._sparse_weight * self._rrf(rank + 1)
@@ -148,6 +162,9 @@ class HybridRetriever:
             )
             hr.rank = i + 1
             results.append(hr)
+
+        # Deduplicate by text to avoid identical chunks from dense+sparse fusion
+        results = self._deduplicate_chunks(results)
 
         latency = time.time() - start
         logger.info(
@@ -201,6 +218,21 @@ class HybridRetriever:
             "subsection": result.get("subsection"),
             "page_start": result.get("page_start"),
             "page_end": result.get("page_end"),
-            "token_count": 0,
-            "metadata": {},
+            "token_count": result.get("token_count", 0),
+            "metadata": result.get("metadata", {}),
         }
+
+    def _deduplicate_chunks(self, chunks: list[HybridResult]) -> list[HybridResult]:
+        """Deduplicate chunks by text content before returning to reranker.
+
+        Hybrid search (dense + sparse) can return the same chunk from both
+        retrievers. This deduplicates by exact text match.
+        """
+        seen_texts = set()
+        unique_chunks = []
+        for chunk in chunks:
+            text = chunk.text.strip() if chunk.text else ""
+            if text and text not in seen_texts:
+                seen_texts.add(text)
+                unique_chunks.append(chunk)
+        return unique_chunks

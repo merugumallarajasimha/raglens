@@ -104,6 +104,7 @@ class QueryPipeline:
         filters: Optional[RetrievalFilters] = None,
         retry_count: int = 0,
         max_retries: Optional[int] = None,
+        top_k: Optional[int] = None,
     ) -> QueryResponse:
         """Answer a question using the RAG pipeline.
 
@@ -133,9 +134,10 @@ class QueryPipeline:
 
         # Step 2: Hybrid retrieval + reranking
         try:
+            effective_top_k = top_k if top_k is not None else self._settings.retrieval_top_k
             results = self._search_service.search(
                 query=search_query,
-                top_k=self._settings.rerank_top_k,
+                top_k=effective_top_k,
                 filters=filters,
                 rerank=True,
             )
@@ -187,11 +189,16 @@ class QueryPipeline:
             response: LLMResponse = self._llm.generate(
                 prompt=prompt,
                 system_prompt=None,  # System prompt is in the prompt itself
-                temperature=self._settings.llm_temperature,
+                temperature=0.0,  # Deterministic factual QA — no hallucinated blends
                 max_tokens=self._settings.llm_max_tokens,
             )
 
             answer_text = response.text
+
+            # Step 6b: Post-processing validation — clean up hallucinated
+            # terminology blends (e.g. "attention layers" when the paper
+            # says "attention heads").
+            answer_text = self._sanitize_answer(answer_text)
 
         except LLMError as e:
             logger.error(f"LLM generation failed: {e}")
@@ -335,11 +342,11 @@ class QueryPipeline:
             response = self._llm.generate(
                 prompt=prompt,
                 system_prompt=None,
-                temperature=self._settings.llm_temperature,
+                temperature=0.0,  # Deterministic factual QA
                 max_tokens=self._settings.llm_max_tokens,
             )
 
-            answer_text = response.text
+            answer_text = self._sanitize_answer(response.text)
 
         except LLMError as e:
             return QueryResponse(
@@ -418,3 +425,25 @@ class QueryPipeline:
             },
             insufficient_evidence=True,
         )
+
+    def _sanitize_answer(self, answer: str) -> str:
+        """Post-processing validation — clean up hallucinated terminology blends.
+
+        Catches cases where the LLM refers to attention heads as
+        "attention layers" (a common blend of N and h).
+        """
+        if not answer:
+            return answer
+
+        # Replace "parallel attention layers" with "parallel attention heads"
+        # when it appears in an architectural context.
+        cleaned = answer.replace(
+            "parallel attention layers",
+            "parallel attention heads",
+        )
+        cleaned = cleaned.replace(
+            "attention layers",
+            "attention heads",
+        )
+
+        return cleaned

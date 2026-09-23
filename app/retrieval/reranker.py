@@ -61,7 +61,7 @@ class Reranker:
         self,
         query: str,
         candidates: list[HybridResult],
-        top_k: int = 5,
+        top_k: int = 10,
     ) -> list[HybridResult]:
         """Re-rank candidates using the cross-encoder.
 

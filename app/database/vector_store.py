@@ -7,6 +7,7 @@ with metadata payload (chunk_id, paper_id, section, page, etc.).
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Optional
 
 from qdrant_client import QdrantClient
@@ -17,6 +18,14 @@ from app.core.exceptions import VectorStoreError
 from app.ingestion.chunker import Chunk
 
 logger = logging.getLogger("raglens.vector_store")
+
+# Deterministic namespace for converting custom chunk IDs into Qdrant-compliant UUIDs
+RAGLENS_NAMESPACE = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+
+
+def _to_valid_uuid(custom_id: str) -> str:
+    """Converts a string ID into a deterministic UUID v5 string compatible with Qdrant."""
+    return str(uuid.uuid5(RAGLENS_NAMESPACE, custom_id))
 
 
 class RetrievedChunk:
@@ -93,19 +102,16 @@ class QdrantVectorStore:
             embedding_dim=settings.embedding_dim,
         )
 
-    def create_collection(self, force: bool = False) -> None:
-        """Create the collection if it doesn't exist."""
+    def ensure_collection(self) -> None:
+        """Create the collection if it doesn't exist, using the configured vector size."""
         collections = self._client.get_collections()
         names = [c.name for c in collections.collections]
 
         if self._collection_name in names:
-            if force:
-                self._client.delete_collection(self._collection_name)
-            else:
-                logger.info(f"Collection {self._collection_name} already exists")
-                return
+            logger.info(f"Collection {self._collection_name} already exists")
+            return
 
-        self._client.recreate_collection(
+        self._client.create_collection(
             collection_name=self._collection_name,
             vectors_config=qmodels.VectorParams(
                 size=self._embedding_dim,
@@ -127,12 +133,8 @@ class QdrantVectorStore:
     ) -> int:
         """Upsert chunks with their embeddings into the collection.
 
-        Args:
-            chunks: List of Chunk objects.
-            embeddings: List of embedding vectors (same order as chunks).
-
-        Returns:
-            Number of points upserted.
+        Creates the collection if it does not exist, then logs the resulting
+        point count so writes can be confirmed.
         """
         if len(chunks) != len(embeddings):
             raise VectorStoreError(
@@ -142,10 +144,13 @@ class QdrantVectorStore:
         if not chunks:
             return 0
 
+        # Ensure the collection exists with the correct vector size
+        self.ensure_collection()
+
         points = []
         for chunk, emb in zip(chunks, embeddings):
             points.append(qmodels.PointStruct(
-                id=chunk.chunk_id,
+                id=_to_valid_uuid(chunk.chunk_id),  # Fixed: Convert string ID to UUID
                 vector=emb,
                 payload={
                     "paper_id": chunk.paper_id,
@@ -156,7 +161,7 @@ class QdrantVectorStore:
                     "page_end": chunk.page_end,
                     "token_count": chunk.token_count,
                     "text": chunk.text,
-                    "chunk_id": chunk.chunk_id,
+                    "chunk_id": chunk.chunk_id,  # Custom ID is safely kept in the payload
                     "metadata": chunk.metadata,
                 },
             ))
@@ -167,11 +172,14 @@ class QdrantVectorStore:
             wait=True,
         )
 
+        # Log the collection point count to confirm writes landed
+        point_count = self.count()
         logger.info(
             "Chunks upserted to Qdrant",
             extra={"extra_data": {
                 "collection": self._collection_name,
-                "count": len(points),
+                "upserted": len(points),
+                "collection_points_count": point_count,
             }},
         )
         return len(points)
@@ -183,27 +191,30 @@ class QdrantVectorStore:
         score_threshold: Optional[float] = None,
         filter_conditions: Optional[dict] = None,
     ) -> list[RetrievedChunk]:
-        """Search for similar vectors in the collection.
-
-        Args:
-            query_vector: The query embedding.
-            top_k: Number of results to return.
-            score_threshold: Minimum score for results.
-            filter_conditions: Optional payload filters (e.g., {"paper_id": "xxx"}).
-
-        Returns:
-            List of RetrievedChunk objects sorted by score descending.
-        """
+        """Search for similar vectors in the collection."""
         search_filter = self._build_filter(filter_conditions)
 
-        results = self._client.search(
-            collection_name=self._collection_name,
-            query_vector=query_vector,
-            limit=top_k,
-            score_threshold=score_threshold,
-            filter=search_filter,
-            with_payload=True,
-        )
+        # Uses query_points for qdrant-client >= 1.10.0 with query_filter
+        try:
+            query_response = self._client.query_points(
+                collection_name=self._collection_name,
+                query=query_vector,
+                limit=top_k,
+                score_threshold=score_threshold,
+                query_filter=search_filter,
+                with_payload=True,
+            )
+            results = query_response.points
+        except (AttributeError, TypeError):
+            # Fallback for older qdrant-client versions
+            results = self._client.search(
+                collection_name=self._collection_name,
+                query_vector=query_vector,
+                limit=top_k,
+                score_threshold=score_threshold,
+                query_filter=search_filter,
+                with_payload=True,
+            )
 
         retrieved: list[RetrievedChunk] = []
         for hit in results:
@@ -231,7 +242,7 @@ class QdrantVectorStore:
             points_selector=qmodels.Filter(
                 must=[qmodels.FieldCondition(
                     key="paper_id",
-                    match=qmodels.MatchValue(paper_id),
+                    match=qmodels.MatchValue(value=paper_id),
                 )],
             ),
             wait=True,
@@ -259,6 +270,8 @@ class QdrantVectorStore:
 
         must_conditions = []
         for key, value in conditions.items():
+            if value is None:
+                continue
             must_conditions.append(qmodels.FieldCondition(
                 key=key,
                 match=qmodels.MatchValue(value=str(value)) if not isinstance(value, list)

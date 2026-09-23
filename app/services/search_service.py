@@ -140,10 +140,12 @@ class SearchService:
         filter_dict = self._filters_to_dict(filters)
 
         # Step 1: Dense + Sparse fusion (RRF)
+        # Fetch a larger candidate pool (at least 30, or 3x top_k) for better fusion
+        candidate_pool_k = max(top_k * 3, 30)
         hybrid = self.get_hybrid_retriever()
         results = hybrid.retrieve(
             query=query,
-            top_k=self._settings.hybrid_top_k,
+            top_k=candidate_pool_k,
             filters=filter_dict,
         )
 

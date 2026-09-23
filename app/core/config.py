@@ -67,13 +67,14 @@ class Settings(BaseSettings):
     dense_top_k: int = 20
     sparse_top_k: int = 20
     hybrid_top_k: int = 20
-    rerank_top_k: int = 5
+    rerank_top_k: int = 10
+    retrieval_top_k: int = 10
     rrf_k: int = 60
     dense_weight: float = 0.5
     sparse_weight: float = 0.5
 
     # ── Chunking ────────────────────────────────────────────────────────
-    chunk_size: int = 800
+    chunk_size: int = 512
     chunk_overlap: int = 120
     chunking_strategy: str = "section_aware"  # fixed | paragraph | section_aware
 
